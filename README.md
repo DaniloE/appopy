@@ -13,6 +13,7 @@ appopy imports http-logfiles and stores the entries in seperate tables for each 
 Additional there is a table called "daily_stats" where a daily values are kept in jsonb-format.
 The function will also make a lookup in the GeoIP-data for every remote IP and stores the request-count per country in the daily stats.
 When the importis finished, the logfile will be deleted.
+The import-dir and the path to the GeoIP-database are stored in an additional config table.
 
 Usage
 
