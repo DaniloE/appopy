@@ -18,7 +18,7 @@ The import-dir and the path to the GeoIP-database are stored in an additional co
 Usage
 
 * Run SQL-Script with user postgres, to create database and user for the import
--> as root user do something like "su - postgres -c "psql < /root/create_appopy_nojson.sql""
+-> as root user do something like "su - postgres -c "psql < /root/create_appopy.sql""
 * Connect to database and use function appopy_import to import the logfiles in the import dir
 * default values are listed below
 
