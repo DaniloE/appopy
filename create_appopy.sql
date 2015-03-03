@@ -173,6 +173,7 @@ AS $$
 
         if filelog:
             filelog.close()
+        os.remove(logfile)
                 
 $$ LANGUAGE plpythonu;
 
