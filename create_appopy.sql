@@ -1,3 +1,5 @@
+DROP DATABASE IF EXISTS httplog;
+DROP ROLE IF EXISTS appopy;
 CREATE ROLE appopy WITH LOGIN PASSWORD 'ua3Aepha';
 CREATE DATABASE httplog OWNER appopy;
 REVOKE ALL PRIVILEGES ON DATABASE httplog FROM PUBLIC;
@@ -10,10 +12,9 @@ CREATE TABLE logdata (
     domain          TEXT ,
     remip           cidr,
     remtime         TIMESTAMP,
-    method          TEXT,
     request         TEXT,
     status          SMALLINT,
-    size            BIGINT,
+    size            INT,
     referer         TEXT,
     agent           TEXT 
     );
@@ -27,7 +28,7 @@ CREATE TABLE config (
     configvalue    TEXT
     );
 
-INSERT INTO config (configname,configvalue) VALUES ('importpath','/var/lib/pgsql/9.4/data/appopy_import');
+INSERT INTO config (configname,configvalue) VALUES ('importpath','/var/lib/pgsql/9.5/data/appopy_import');
 INSERT INTO config (configname,configvalue) VALUES ('geoippath','/usr/share/GeoIP/GeoIP.dat');
 
 
@@ -38,18 +39,19 @@ RESET ROLE;
 CREATE FUNCTION appopy_import ()
     RETURNS TEXT
 AS $$
-    import re
-    import os
-    import gzip
-    import zipfile
-    import json
-    import pygeoip
+    from re import compile as rcompile
+    from os import listdir, path, remove
+    from gzip import open as zopen
+    from zipfile import is_zipfile
+    from json import dumps
+    from pygeoip import GeoIP, GeoIPError, MEMORY_CACHE
     from datetime import datetime
 
     geopath_q=plpy.execute("SELECT configvalue FROM config WHERE configname = 'geoippath';")
     geopath=geopath_q[0]['configvalue']
-    gi = pygeoip.GeoIP(geopath, pygeoip.MEMORY_CACHE)
+    gi = GeoIP(geopath, MEMORY_CACHE)
     daily_list = []
+    tablelist= []
 
     # class for daily domainstatistic
     class daily_domain:
@@ -67,7 +69,7 @@ AS $$
             dd_dict['traffic'] = self.traffic
             for ll in self.land.keys():
                 dd_dict[ll] = self.land[ll]
-            return json.dumps(dd_dict)
+            return dumps(dd_dict)
 
     impath_q=plpy.execute("SELECT configvalue FROM config WHERE configname = 'importpath';")
     impath=impath_q[0]['configvalue']
@@ -75,105 +77,91 @@ AS $$
     parts = [r'(?P<host>\S+)',r'(?P<rip>\S+)',r'\S+',r'(?P<user>.+)',
              r'\[(?P<time>.+)\]',r'"(?P<request>.+)"',r'(?P<status>([0-9]+|-))',
              r'(?P<size>\S+)',r'"(?P<referer>.*)"',r'"(?P<agent>.*)"',r'".*"']
-    pattern = re.compile(r'\s+'.join(parts) + r'\s*\Z')
+    pattern = rcompile(r'\s+'.join(parts) + r'\s*\Z')
 
-    importfiles=os.listdir(impath)
+    importfiles=listdir(impath)
     if len(importfiles) == 0:
-        plypa.notice('appopy: Keine Dateien zum Import im Verzeichnis')
+        plpy.notice('appopy: no files to import')
     for logfile in importfiles:
-        logfile=os.path.join(impath, logfile)
-        if zipfile.is_zipfile(logfile):
-            filelog = gzip.open(logfile)
+        logfile=path.join(impath, logfile)
+        if is_zipfile(logfile):
+            filelog = zopen(logfile)
         else:
             filelog = open(logfile)
         for line in filelog:
             m = pattern.match(line)
-            if m is None:
+            if not m:
                 plpy.warning("appopy: logfileentry does not match regex-pattern and could not be imported:\n   "+str(line))
                 continue                
+            domain_ok=False
+            res = m.groupdict()
+            if res['size'] == "-":
+                res['size'] = 0
             else:
-                domain_ok=False
-                res = m.groupdict()
-                if res['size'] == "-":
-                    res['size'] = 0
-                else:
-                    res['size'] = int(res['size'])
-                try:
-                    request_splitted=res['request'].split()
-                    res['method'] = request_splitted[0]
-                    res['request'] = request_splitted[1]
-                except IndexError:
-                    #plpy.warning("appopy: no method in request, saved as method UNDEF:\n "+str(line))
-                    res['method'] = 'UNDEF'
-                if res['status'] == '-':
-                    res['status'] = '0'
-                tablename="date_"+res['host'].replace('.','_').replace('-','_')
-
+                res['size'] = int(res['size'])
+            if res['status'] == '-':
+                res['status'] = 0
+            else:
+                res['status'] = int(res['status'])
+            tablename="d_"+res['host'][:30].replace('.','_').replace('-','_')
+ 
+            if tablename not in tablelist:
                 table_exists=plpy.execute("SELECT relname FROM pg_class where relname=%s;" % 
                     ( plpy.quote_nullable(tablename),))
                 if not table_exists:
                     plpy.execute("CREATE TABLE IF NOT EXISTS %s (check(domain = %s)) inherits(logdata);" % 
                         (tablename,plpy.quote_nullable(res['host'])))
+                tablelist.append(tablename)
+            
+            plpy.execute("""INSERT INTO %s (domain, remip, remtime, request, status, size, referer, agent) 
+                                VALUES (%s,%s,%s,%s,%d,%d,%s,%s);""" % (
+                tablename,
+                plpy.quote_nullable(res['host']),
+                plpy.quote_nullable(res['rip']),
+                plpy.quote_nullable(res['time']),
+                plpy.quote_nullable(res['request']),
+                res['status'],
+                res['size'],
+                plpy.quote_nullable(res['referer']),
+                plpy.quote_nullable(res['agent'])))
+ 
+            ptime, pzone = res['time'].split()
+            ptime = str(datetime.strptime(ptime, "%d/%b/%Y:%H:%M:%S").date())
 
-                plpy.execute("""INSERT INTO %s (domain, remip, remtime, method, request, status, size, referer, agent) 
-                                VALUES (%s,%s,%s,%s,%s,%s,%d,%s,%s);""" % (
-                    tablename,
-                    plpy.quote_nullable(res['host']),
-                    plpy.quote_nullable(res['rip']),
-                    plpy.quote_nullable(res['time']),
-                    plpy.quote_nullable(res['method']),
-                    plpy.quote_nullable(res['request']),
-                    plpy.quote_nullable(res['status']),
-                    res['size'],
-                    plpy.quote_nullable(res['referer']),
-                    plpy.quote_nullable(res['agent'])))
-
-                ptime, pzone = res['time'].split()
-                ptime = str(datetime.strptime(ptime, "%d/%b/%Y:%H:%M:%S").date())
-
-                for ddomain in daily_list:
-                    if ddomain.hostname == res['host'] and ddomain.date_time == ptime:
-                        ddomain.count += 1
-                        if res['rip'] == '127.0.0.1' or res['rip'] == '::1':
-                            local_land='localhost'
-                        else:
-                            try:
-                                local_land=gi.country_code_by_addr(res['rip'])
-                                if local_land == '':
-                                    local_land = 'notfound'
-                            except pygeoip.GeoIPError:
-                                local_land='noipv4'
-                        if local_land not in ddomain.land.keys():
-                            ddomain.land[local_land]=1
-                        else:
-                            ddomain.land[local_land]+= 1
-                        ddomain.traffic += res['size']
-                        domain_ok=True
-    
-                if not domain_ok:
-                    dado=daily_domain()
-                    dado.hostname=res['host']
-                    dado.date_time=ptime
-                    if res['rip'] == '127.0.0.1' or res['rip'] == '::1':
-                        local_land='localhost'
-                    else:
-                        try:
-                            local_land=gi.country_code_by_addr(res['rip'])
-                            if local_land == '':
-                                local_land = 'notfound'
-                        except pygeoip.GeoIPError:
-                            local_land='noipv4'
-                    dado.land[local_land]=1
-                    dado.count += 1
-                    dado.traffic += res['size']
-                    daily_list.append(dado)
+            for i,cdomain in enumerate(daily_list):
+                if cdomain.hostname == res['host'] and cdomain.date_time == ptime:
+                    domain_ok=True
+                    domain_list_index=i
+            if domain_ok:
+                ddomain=daily_list[domain_list_index]
+            else:
+                ddomain=daily_domain()
+                ddomain.hostname=res['host']
+                ddomain.date_time=ptime
+                daily_list.append(ddomain)
+            ddomain.count += 1
+            if res['rip'] == '127.0.0.1':
+                local_land='localhost'
+            else:
+                try:
+                    local_land=gi.country_code_by_addr(res['rip'])
+                    if not local_land:
+                        local_land = 'notfound'
+                except GeoIPError:
+                    local_land='noipv4'
+            if local_land not in ddomain.land.keys():
+                ddomain.land[local_land]=1
+            else:
+                ddomain.land[local_land]+= 1
+            ddomain.traffic += res['size']
+ 
         for daidom in daily_list:
             plpy.execute("INSERT INTO stat_daily (daily_data) VALUES (%s);" % 
                 (plpy.quote_nullable(daidom.get_json()),))        
 
         if filelog:
             filelog.close()
-        os.remove(logfile)
+        #remove(logfile)
                 
 $$ LANGUAGE plpythonu;
 
