@@ -25,7 +25,7 @@ Usage
 Default values
 
 * database user is "appopy", database name is "httplog"
-* import dir for logfiles is /var/lib/pgsql/9.4/data/appopy_import
+* import dir for logfiles is /var/lib/pgsql/9.5/data/appopy_import
 * logformat in function is LogFormat "%V %a %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\" \"%{cookie}i\""
 
 
